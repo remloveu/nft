@@ -109,6 +109,14 @@ def make_json(name,
               file_type,
               width=0,
               height=0):
+    if data_type == 'canvas':
+        image = ''
+    elif data_type == 'layer':
+        image = []
+        for k in data_hash:
+            image.append(pinata_url + k)
+    else:
+        image = pinata_url + data_hash[0]
     parameters = {
         'name': name,
         'type': data_type,
@@ -122,7 +130,7 @@ def make_json(name,
         'file_type': file_type,
         'width': width,
         'height': height,
-        'image': pinata_url + data_hash[0],
+        'image': image,
         'external_url': web_url + str(token_id),
         'animation_url': '',
     }
