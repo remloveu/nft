@@ -662,7 +662,7 @@ def update():
         loop = asyncio.get_event_loop()
         tasks = [up(doc) for doc in cursor]
         loop.run_until_complete(asyncio.wait(tasks))
-        time.sleep(10)
+        time.sleep(60)
 
 
 # 获取token_id
