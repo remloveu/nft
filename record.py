@@ -6,7 +6,6 @@ import time
 import pymongo.errors
 from os import path
 
-
 # 连接mongodb
 client = pymongo.MongoClient('127.0.0.1', 27017)
 db = client.heco
@@ -18,6 +17,15 @@ user = db.user
 token_number = db.token
 # 交易记录集合
 record = db.record
+# 已授权token集合
+approve = db.approve
+# 记录用户出售收益集合
+sell = db.sell
+# 记录用户分成收益集合
+profit = db.profit
+# 记录更新到的块
+block = db.block
+
 
 w3 = Web3(Web3.HTTPProvider('https://http-mainnet-node.defibox.com'))
 w3.middleware_onion.inject(geth_poa_middleware, layer=0)
@@ -41,7 +49,10 @@ event_dict = {
     '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef',
     'sale':
     '0xe8038e253f57f3f9c7277af1d801786319db71cc5491fe5db55a0e04f1b3466f',
-    'bid': '0xcbf61548a249040d379a7f7a4486a18d78824bce978077f4943fb55e111af1c1'
+    'bid':
+    '0xcbf61548a249040d379a7f7a4486a18d78824bce978077f4943fb55e111af1c1',
+    'control_token':
+    '0xfc1e08f776282b1abf0734388c9042ad8206984bf5d69a721d120c9af38412fc'
 }
 
 
@@ -78,6 +89,8 @@ def handle(event_list):
             if int(topics[1].hex()[2:], 16) == 0:
                 ad_from = ''
                 event_type = 'mint'
+                works.update_one({'_id': token_id}, {'$set': {'flag': True}})
+                approve.delete_one({'_id': token_id})
             else:
                 ad_from = '0x' + topics[1].hex()[26:]
                 ad_from = w3.toChecksumAddress(ad_from)
@@ -86,6 +99,11 @@ def handle(event_list):
                     ad_to = ''
                     event_type = 'burn'
                 else:
+                    works.update_one(
+                        {'_id': token_id},
+                        {'$set': {
+                            'owner': ad_to
+                        }})
                     event_type = 'transfer'
             tx_dict = make_dict(tx_hash, token_id, event_type, ad_from, ad_to,
                                 '0', time_stamp, url)
@@ -105,6 +123,35 @@ def handle(event_list):
                 if li['_id'] == tx_hash:
                     li['type'] = 'sale'
                     li['price'] = str(buy_num)
+            try:
+                for li in return_list:
+                    if li['_id'] == tx_hash:
+                        user_from = li['from']
+                sell.insert_one({
+                    '_id': tx_hash,
+                    'token_id': token_id,
+                    'user_address': user_from,
+                    'price': str(int(buy_num * 0.85))
+                })
+            except Exception:
+                pass
+            sale_count = sell.count_documents({'token_id':token_id})
+            if not sale_count == 1:
+                try:
+                    creator = contract.functions.uniqueTokenCreators(token_id,0).call()
+                    profit.insert_one({
+                        '_id': tx_hash,
+                        'token_id': token_id,
+                        'user_address': creator,
+                        'price': str(int(buy_num * 0.1))
+                    })
+                except Exception:
+                    pass
+            works.update_one({'_id': token_id},
+                             {'$set': {
+                                 'state1': 0,
+                                 'state2': 0
+                             }})
         elif topics[0].hex() == event_dict['auction_set']:
             token_id = int(data[:66], 16)
             time_begin = int(data[66:130], 16)
@@ -113,7 +160,7 @@ def handle(event_list):
             res = contract.functions.sellingState(token_id).call(
                 {'gas': state_gas})
             start_price = str(res[1])
-            if start_price == 0:
+            if start_price == '0':
                 state2 = 0
             else:
                 now_time = time.time()
@@ -127,6 +174,8 @@ def handle(event_list):
                 {'_id': token_id},
                 {'$set': {
                     'start_price': start_price,
+                    'auction_start_time': time_begin,
+                    'auction_end_time': time_end,
                     'state2': state2
                 }})
         elif topics[0].hex() == event_dict['price_set']:
@@ -141,6 +190,10 @@ def handle(event_list):
                         'state1': 1,
                         'buy_price': str(buy_price)
                     }})
+        elif topics[0].hex() == event_dict['control_token']:
+            token_id = int(data[:66], 16)
+            updated = int(data[706:], 16)
+            works.update_one({'_id': token_id}, {'$set': {'stage': updated}})
     if not len(return_list) == 0:
         try:
             record.insert_many(return_list)
@@ -151,8 +204,8 @@ def handle(event_list):
 # 事件循环
 def log_loop():
     begin = 8126082
-    print(w3.eth.get_block_number())
-    while begin < w3.eth.get_block_number():
+    block = w3.eth.get_block_number()
+    while begin < block:
         try:
             li = w3.eth.getLogs({'address':address, 'fromBlock':begin,'toBlock':begin+5000})
             if not len(li) == 0:
@@ -162,11 +215,5 @@ def log_loop():
             print(e)
 
 
+record.drop()
 log_loop()
-cursor = works.find({'type':'layer'})
-for doc in cursor:
-    a = contract.functions.getControlToken(doc['_id']).call()
-    works.update_one({'_id':doc['_id']},{'$set':{'stage':a[2]}})
-
-works.update_many({},{'$set':{'collector':[]}})
-user.update_many({},{'$set':{'follows':[],'fans':[]}})
