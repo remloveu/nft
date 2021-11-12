@@ -556,12 +556,12 @@ def log_loop():
                     if not len(event_list) == 0:
                         handle(event_list)
                 except Exception as e:
-                    print(e)
+                    pass
                 fromBlock = toBlock+1
                 block.update_one({'_id':1},{'$set':{'block':fromBlock}})
                 time.sleep(3)
         except Exception as e:
-            print(e)
+            pass
         time.sleep(3)
 
 
