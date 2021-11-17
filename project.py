@@ -9,6 +9,10 @@ def func2():
 
 
 t1 = Thread(target=func1)
-t1.start()
 t2 = Thread(target=func2)
+t1.setDaemon(True)
+t2.setDaemon(True)
+t1.start()
 t2.start()
+t1.join()
+t2.join()

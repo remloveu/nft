@@ -152,6 +152,9 @@ def pin_str_to_ipfs():
 
 # 根据地址获取具体信息
 def info(user_address, param):
+    user_count = user.count_documents({'_id':user_address})
+    if user_count == 0:
+        add_user(user_address)
     doc = user.find_one({'_id': user_address})
     if doc['avatar']:
         doc['avatar'] = url + doc['avatar']
@@ -701,7 +704,7 @@ def save_info():
             'follows': [],
             'fans': [],
         })
-        return '1'
+        return ''
     else:
         user.update_one(
             {'_id': user_address},
@@ -717,7 +720,7 @@ def save_info():
                 }
             },
         )
-        return '0'
+        return ''
 
 
 # 获取用户信息
@@ -742,7 +745,7 @@ def get_works():
     token = int(token)
     num = works.count_documents({'_id': token})
     if num == 0:
-        return 'The token_id does not exist'
+        return {}
     cursor = works.find_one({'_id': token})
     try:
         json_dict = {
@@ -839,6 +842,10 @@ def follow_user():
     data = request.get_json()
     follow_from = Web3.toChecksumAddress(data['from'])
     follow_to = Web3.toChecksumAddress(data['to'])
+    if user.count_documents({'_id':follow_from}) == 0:
+        add_user(follow_from)
+    if user.count_documents({'_id':follow_to}) == 0:
+        add_user(follow_to)
     follow_doc = user.find_one({'_id': follow_from})
     follows = follow_doc['follows']
     if follow_to not in follows:
@@ -875,6 +882,9 @@ def unfollow_user():
 @server.route('/get_follows', methods=['GET'])
 def get_follows():
     user_address = Web3.toChecksumAddress(request.args.get('user_address'))
+    user_count = user.count_documents({'_id':user_address})
+    if user_count == 0:
+        add_user(user_address)
     doc = user.find_one({'_id': user_address})
     follows = doc['follows']
     return_list = []
@@ -891,6 +901,9 @@ def get_follows():
 @server.route('/get_fans', methods=['GET'])
 def get_fans():
     user_address = Web3.toChecksumAddress(request.args.get('user_address'))
+    user_count = user.count_documents({'_id':user_address})
+    if user_count == 0:
+        add_user(user_address)
     doc = user.find_one({'_id': user_address})
     fans = doc['fans']
     return_list = []
@@ -964,6 +977,21 @@ def get_income():
         'total_profit': total_profit,
         'total': total_sell + total_profit
     })
+
+
+# 搜索匹配内容
+@server.route('/search_content', methods=['GET'])
+def search_content():
+    query = request.args.get('query')
+    work_list = []
+    user_list = []
+    work_cursor = works.find({'name':{'$regex':query,'$options':'$i'}})
+    for doc in work_cursor:
+        work_list.append(dict(name=doc['name'],token_id=doc['_id']))
+    user_cursor = user.find({'name':{'$regex':query,'$options':'$i'}})
+    for doc in user_cursor:
+        user_list.append(dict(name=doc['name'],address=doc['_id']))
+    return dict(works=work_list,work_count=len(work_list),user=user_list,user_count=len(user_list))
 
 
 t1 = Thread(target=pin_str_to_ipfs)
