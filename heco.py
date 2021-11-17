@@ -995,6 +995,6 @@ def search_content():
 
 
 t1 = Thread(target=pin_str_to_ipfs)
-t1.start()
 t2 = Thread(target=pin_file_to_ipfs)
+t1.start()
 t2.start()

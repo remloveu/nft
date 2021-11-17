@@ -1,8 +1,10 @@
 import os
 from threading import Thread
 
+
 def func1():
     os.system('gunicorn -c config.py heco:server')
+
 
 def func2():
     os.system('python3 thread.py')
