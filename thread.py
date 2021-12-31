@@ -10,12 +10,17 @@ import pymongo.errors
 from threading import Thread
 import asyncio
 import os
+import smtplib
+from email.mime.text import MIMEText
+from email.utils import formataddr
 
 # 连接mongodb
 client = pymongo.MongoClient('127.0.0.1', 27017)
 db = client.heco
 # 作品信息集合
 works = db.works
+# 用户集合
+user = db.user
 # 交易记录集合
 record = db.record
 # 已授权token集合
@@ -41,7 +46,7 @@ with open(str(path.join(dir_path, 'contract_abi.json')),
     abi = json.load(abi_definition)
 with open('private.json', 'r') as f:
     res = json.load(f)
-address = res['contract_address']
+address = res['multiple_contract']
 black_address = '0xe7a5B85218a9F685D89630e7312b5686cdD49175'
 contract = w3.eth.contract(address=address, abi=abi)
 tx_url = res['tx_url']
@@ -62,16 +67,13 @@ event_dict = {
 block_num = block.count_documents({'_id':1})
 if block_num == 0:
     block.insert_one({'_id':1,'block':w3.eth.get_block_number()})
-times = 0
 while 1:
     try:
         number = contract.functions.expectedTokenSupply().call()
-        print('sucess')
+        print('success')
         break
     except Exception:
         time.sleep(1)
-        times = times + 1
-        print('retry times:'+ str(times))
         pass
 if token_number.count() == 0:
     token_number.insert_one({'_id': 1, 'token_num': number})
@@ -100,6 +102,19 @@ def make_dict(tx_hash, token_id, event_type, ad_from, ad_to, price, time_stamp,
         'url': url
     }
     return db_dict
+
+
+def make_content(event, token_id, ad_from, ad_to, tx_hash, price):
+    if event == 'transfer':
+        content = 'event:{}\nfrom:{}\nto:{}\ntoken_id:{}\nhash:{}\nplatform:testabi'.format(
+            event, ad_from, ad_to, token_id, tx_hash)
+    elif event == 'bid':
+        content = 'event:{}\nfrom:{}\nbid_count:{}\ntoken_id:{}\nhash:{}\nplatform:testabi'.format(
+            event, ad_from, price, token_id, tx_hash)
+    else:
+        content = 'event:{}\nfrom:{}\nto:{}\nprice:{}\ntoken_id:{}\nhash:{}\nplatform:testabi'.format(
+            event, ad_from, ad_to, price, token_id, tx_hash)
+    return content
 
 
 # 处理事件
@@ -131,7 +146,7 @@ def handle(event_list):
                     event_type = 'burn'
                 else:
                     works.update_one(
-                        {'_id': token_id}, 
+                        {'_id': token_id},
                         {'$set': {
                             'owner': ad_to
                         }})
@@ -220,11 +235,6 @@ def handle(event_list):
             token_id = int(data[:66], 16)
             updated = int(data[706:], 16)
             works.update_one({'_id': token_id}, {'$set': {'stage': updated}})
-    if not len(return_list) == 0:
-        try:
-            record.insert_many(return_list)
-        except pymongo.errors.BulkWriteError:
-            pass
 
 
 # 事件循环
@@ -338,13 +348,16 @@ async def up(doc):
 # 更新数据库内容
 def update():
     while 1:
-        cursor = works.find()
-        new_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(new_loop)
-        loop = asyncio.get_event_loop()
-        tasks = [up(doc) for doc in cursor]
-        loop.run_until_complete(asyncio.wait(tasks))
-        time.sleep(60)
+        try:
+            cursor = works.find()
+            new_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(new_loop)
+            loop = asyncio.get_event_loop()
+            tasks = [up(doc) for doc in cursor]
+            loop.run_until_complete(asyncio.wait(tasks))
+            time.sleep(60)
+        except Exception:
+            pass
 
 
 t1 = Thread(target=log_loop)
