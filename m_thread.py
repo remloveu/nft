@@ -209,7 +209,7 @@ async def up(doc):
         owner_gas = contract.functions.ownerOf(token_id).estimateGas()
         owner = contract.functions.ownerOf(token_id).call({'gas': owner_gas})
         if owner == black_address:
-            works.delete_one({'token_id': token_id})
+            works.delete_one({'token_id': token_id,'contract':'v1'})
             return
         if judge(token_id):
             if doc['type'] == 'single':

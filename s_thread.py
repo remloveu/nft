@@ -358,7 +358,7 @@ async def up(doc):
         owner_gas = contract.functions.ownerOf(token_id).estimateGas()
         owner = contract.functions.ownerOf(token_id).call({'gas': owner_gas})
         if owner == black_address:
-            works.delete_one({'token_id': token_id})
+            works.delete_one({'token_id': token_id,'contract':'v2'})
             return
         state_gas = contract.functions.sellingState(token_id).estimateGas()
         res = contract.functions.sellingState(token_id).call(
