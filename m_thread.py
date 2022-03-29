@@ -10,25 +10,12 @@ import pymongo.errors
 from threading import Thread
 import asyncio
 import os
-import smtplib
-from email.mime.text import MIMEText
-from email.utils import formataddr
 
 # 连接mongodb
 client = pymongo.MongoClient('127.0.0.1', 27017)
 db = client.heco
 # 作品信息集合
 works = db.works
-# 用户集合
-user = db.user
-# 交易记录集合
-record = db.record
-# 已授权token集合
-approve = db.approve
-# 记录用户出售收益集合
-sell = db.sell
-# 记录用户分成收益集合
-profit = db.profit
 # 记录更新到的块
 block = db.block
 # 可用token_id集合
@@ -85,7 +72,6 @@ if not os.path.exists('{}/avatar'.format(folder)):
     os.mkdir('{}/avatar'.format(folder))
 if not os.path.exists('{}/small'.format(folder)):
     os.mkdir('{}/small'.format(folder))
-record.create_index([('time', -1)])
 
 
 # 生成交易字典
@@ -102,19 +88,6 @@ def make_dict(tx_hash, token_id, event_type, ad_from, ad_to, price, time_stamp,
         'url': url
     }
     return db_dict
-
-
-def make_content(event, token_id, ad_from, ad_to, tx_hash, price):
-    if event == 'transfer':
-        content = 'event:{}\nfrom:{}\nto:{}\ntoken_id:{}\nhash:{}\nplatform:testabi'.format(
-            event, ad_from, ad_to, token_id, tx_hash)
-    elif event == 'bid':
-        content = 'event:{}\nfrom:{}\nbid_count:{}\ntoken_id:{}\nhash:{}\nplatform:testabi'.format(
-            event, ad_from, price, token_id, tx_hash)
-    else:
-        content = 'event:{}\nfrom:{}\nto:{}\nprice:{}\ntoken_id:{}\nhash:{}\nplatform:testabi'.format(
-            event, ad_from, ad_to, price, token_id, tx_hash)
-    return content
 
 
 # 处理事件
@@ -135,18 +108,17 @@ def handle(event_list):
             if int(topics[1].hex()[2:], 16) == 0:
                 ad_from = ''
                 event_type = 'mint'
-                works.update_one({'_id': token_id}, {'$set': {'flag': True}})
-                approve.delete_one({'_id': token_id})
+                works.update_one({'token_id': token_id,'contract':'v1'}, {'$set': {'flag': True}})
             else:
                 ad_from = '0x' + topics[1].hex()[26:]
                 ad_from = w3.toChecksumAddress(ad_from)
                 if ad_to == black_address:
-                    works.delete_one({'_id': token_id})
+                    works.delete_one({'token_id': token_id,'contract':'v1'})
                     ad_to = ''
                     event_type = 'burn'
                 else:
                     works.update_one(
-                        {'_id': token_id},
+                        {'token_id':token_id,'contract':'v1'},
                         {'$set': {
                             'owner': ad_to
                         }})
@@ -154,45 +126,6 @@ def handle(event_list):
             tx_dict = make_dict(tx_hash, token_id, event_type, ad_from, ad_to,
                                 '0', time_stamp, url)
             return_list.append(tx_dict)
-        elif topics[0].hex() == event_dict['bid']:
-            token_id = int(data[:66], 16)
-            bid_num = int(data[66:130], 16)
-            user_address = w3.toChecksumAddress('0x' + data[154:])
-            tx_dict = make_dict(tx_hash, token_id, 'bid', user_address, '',
-                                str(bid_num), time_stamp, url)
-            return_list.append(tx_dict)
-        elif topics[0].hex() == event_dict['sale']:
-            token_id = int(data[:66], 16)
-            buy_num = int(data[66:130], 16)
-            user_address = w3.toChecksumAddress('0x' + data[154:])
-            for li in return_list:
-                if li['_id'] == tx_hash:
-                    li['type'] = 'sale'
-                    li['price'] = str(buy_num)
-            try:
-                for li in return_list:
-                    if li['_id'] == tx_hash:
-                        user_from = li['from']
-                sell.insert_one({
-                    '_id': tx_hash,
-                    'token_id': token_id,
-                    'user_address': user_from,
-                    'price': str(int(buy_num * 0.85))
-                })
-            except Exception:
-                pass
-            sale_count = sell.count_documents({'token_id':token_id})
-            if not sale_count == 1:
-                try:
-                    creator = contract.functions.uniqueTokenCreators(token_id,0).call()
-                    profit.insert_one({
-                        '_id': tx_hash,
-                        'token_id': token_id,
-                        'user_address': creator,
-                        'price': str(int(buy_num * 0.1))
-                    })
-                except Exception:
-                    pass
         elif topics[0].hex() == event_dict['auction_set']:
             token_id = int(data[:66], 16)
             time_begin = int(data[66:130], 16)
@@ -212,7 +145,7 @@ def handle(event_list):
                 else:
                     state2 = 2
             works.update_one(
-                {'_id': token_id},
+                {'token_id': token_id, 'contract':'v1'},
                 {'$set': {
                     'start_price': start_price,
                     'auction_start_time': time_begin,
@@ -223,18 +156,19 @@ def handle(event_list):
             token_id = int(data[:66], 16)
             buy_price = int(data[66:], 16)
             if buy_price == 0:
-                works.update_one({'_id': token_id}, {'$set': {'state1': 0}})
+                works.update_one({
+                    'token_id': token_id,
+                    'contract': 'v1'
+                }, {'$set': {
+                    'state1': 0
+                }})
             else:
                 works.update_one(
-                    {'_id': token_id},
+                    {'token_id': token_id, 'contract':'v1'},
                     {'$set': {
                         'state1': 1,
                         'buy_price': str(buy_price)
                     }})
-        elif topics[0].hex() == event_dict['control_token']:
-            token_id = int(data[:66], 16)
-            updated = int(data[706:], 16)
-            works.update_one({'_id': token_id}, {'$set': {'stage': updated}})
 
 
 # 事件循环
@@ -270,12 +204,12 @@ def judge(token_id):
 
 # 数据库更新
 async def up(doc):
-    token_id = doc['_id']
+    token_id = doc['token_id']
     try:
         owner_gas = contract.functions.ownerOf(token_id).estimateGas()
         owner = contract.functions.ownerOf(token_id).call({'gas': owner_gas})
         if owner == black_address:
-            works.delete_one({'_id': token_id})
+            works.delete_one({'token_id': token_id})
             return
         if judge(token_id):
             if doc['type'] == 'single':
@@ -289,7 +223,7 @@ async def up(doc):
                 layer_json = doc['json_data']
                 layer_json = json.loads(layer_json)
                 canvas_token_id = layer_json['canvas_token_id']
-                canvas_doc = works.find_one({'_id': canvas_token_id})
+                canvas_doc = works.find_one({'token_id': canvas_token_id})
                 flag = canvas_doc['flag']
         else:
             flag = False
@@ -327,7 +261,7 @@ async def up(doc):
                 pending = contract.functions.pendingBids(token_id).call(
                     {'gas': pending_gas})
                 end_price = str(pending[1])
-        works.update_one({'_id': token_id}, {
+        works.update_one({'token_id': token_id, 'contract':'v1'}, {
             '$set': {
                 'owner': owner,
                 'state1': state1,
@@ -349,7 +283,7 @@ async def up(doc):
 def update():
     while 1:
         try:
-            cursor = works.find()
+            cursor = works.find({'contract':'v1'})
             new_loop = asyncio.new_event_loop()
             asyncio.set_event_loop(new_loop)
             loop = asyncio.get_event_loop()

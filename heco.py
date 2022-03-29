@@ -2,8 +2,10 @@ import pymongo
 import os
 import base64
 import imageio
+import cv2
 from shutil import copyfile
 import moviepy.editor as mp
+from datetime import datetime
 from PIL import Image
 from werkzeug.utils import secure_filename
 import flask
@@ -16,7 +18,6 @@ import requests
 from flask_cors import *
 import time
 from queue import Queue
-import pymongo.errors
 from threading import Thread
 
 # 连接mongodb
@@ -28,14 +29,6 @@ works = db.works
 user = db.user
 # 可用token_id集合
 token_number = db.token
-# 交易记录集合
-record = db.record
-# 已授权token集合
-approve = db.approve
-# 记录用户出售收益集合
-sell = db.sell
-# 记录用户分成收益集合
-profit = db.profit
 
 
 w3 = Web3(Web3.HTTPProvider('https://http-mainnet-node.huobichain.com'))
@@ -50,17 +43,20 @@ with open(str(path.join(dir_path, 'contract_abi.json')),
     abi = json.load(abi_definition)
 with open('private.json', 'r') as f:
     res = json.load(f)
-address = res['contract_address']
+address = res['multiple_contract']
+single_address = res['single_contract']
 black_address = '0xe7a5B85218a9F685D89630e7312b5686cdD49175'
 contract = w3.eth.contract(address=address, abi=abi)
-q = Queue()
-p = Queue()
+single_contract = w3.eth.contract(address=single_address, abi=abi)
+file_queue = Queue()
+str_queue = Queue()
 wallet_address = res['wallet_address']
 private_key = res['private_key']
 endpoint = 'https://api.pinata.cloud/'
 host = res['host']
 url = host + 'data/'
 small_url = url + 'small/'
+single_url = url + 'single/small/'
 headers = {
     'pinata_api_key': res['pinata_api_key'],
     'pinata_secret_api_key': res['pinata_secret_api_key'],
@@ -70,7 +66,7 @@ pinata_url = res['pinata_url']
 web_url = res['web_url']
 
 
-# 生成metadata
+# 生成多图层metadata
 def make_json(name,
               data_type,
               creator,
@@ -105,11 +101,38 @@ def make_json(name,
         'width': width,
         'height': height,
         'image': image,
-        'external_url': web_url + str(token_id),
+        'external_url': web_url + str(token_id) + '?contractVersion=v1',
         'animation_url': '',
     }
-    json_str = json.dumps(parameters)
-    return json_str
+    return json.dumps(parameters)
+
+
+# 生成单图层metadata
+def make_single_json(name,
+              data_type,
+              creator,
+              create_time,
+              introduce,
+              data_hash,
+              tags,
+              file_type,
+              width=0,
+              height=0):
+    parameters = {
+        'name': name,
+        'type': data_type,
+        'creator': creator,
+        'create_time': create_time,
+        'description': introduce,
+        'hash': data_hash,
+        'tags': tags,
+        'file_type': file_type,
+        'width': width,
+        'height': height,
+        'image': pinata_url + data_hash[0],
+        'animation_url': '',
+    }
+    return json.dumps(parameters)
 
 
 # 根据字符串获取hash
@@ -130,8 +153,8 @@ def get_hash(string, flag):
 # 将字符串添加到pinata
 def pin_file_to_ipfs():
     while 1:
-        if not q.empty():
-            file_path = q.get()
+        if not file_queue.empty():
+            file_path = file_queue.get()
             url = endpoint + 'pinning/pinFileToIPFS'
             f = open(file_path, 'rb')
             files = {'file': f}
@@ -142,8 +165,8 @@ def pin_file_to_ipfs():
 
 def pin_str_to_ipfs():
     while 1:
-        if not p.empty():
-            meta_str = p.get()
+        if not str_queue.empty():
+            meta_str = str_queue.get()
             url = endpoint + 'pinning/pinFileToIPFS'
             files = {'file': meta_str}
             requests.post(url, files=files, headers=headers)
@@ -183,7 +206,7 @@ def get_works_from_user(pos, user_address, user_type, page, pic, state):
     if pos == 2:
         cursor_dict[user_type] = {'$elemMatch': {'$eq': user_address}}
     cursor_dict['flag'] = True
-    cursor = works.find(cursor_dict).sort([('_id', 1)])
+    cursor = works.find(cursor_dict).sort([('contract',-1),('token_id', 1)])
     data_count = works.find(cursor_dict).count()
     if data_count % limit == 0:
         total_page = int(data_count / limit)
@@ -202,7 +225,7 @@ def get_works_from_user(pos, user_address, user_type, page, pic, state):
         if not index < start:
             try:
                 json_dict = {
-                    'token_id': doc['_id'],
+                    'token_id': doc['token_id'],
                     'name': doc['name'],
                     'type': doc['type'],
                     'creator_address': doc['creator'],
@@ -211,6 +234,7 @@ def get_works_from_user(pos, user_address, user_type, page, pic, state):
                     'owner_avatar': info(doc['owner'], 'avatar'),
                     'state1': doc['state1'],
                     'state2': doc['state2'],
+                    'contractVersion': doc['contract'],
                 }
                 if json_dict['state1'] == 1:
                     json_dict['buy_price'] = int(doc['buy_price'])
@@ -226,7 +250,7 @@ def get_works_from_user(pos, user_address, user_type, page, pic, state):
                     arr = []
                     data = doc['data']
                     for i in data:
-                        layer_doc = works.find_one({'_id': i})
+                        layer_doc = works.find_one({'token_id': i, 'contract':'v1'})
                         data = layer_doc['data']
                         for j in range(len(data)):
                             data[j] = small_url + data[j]
@@ -241,12 +265,22 @@ def get_works_from_user(pos, user_address, user_type, page, pic, state):
                 else:
                     if doc['is_movie']:
                         single_data = doc['data'].rsplit('.')[0] + '.mp4'
-                        json_dict['single'] = small_url + single_data
+                        if doc['contract'] == 'v2':
+                            json_dict['single'] = single_url + single_data
+                            json_dict['edition'] = doc['edition']
+                            json_dict['edition_count'] = doc['edition_count']
+                        else:
+                            json_dict['single'] = small_url + single_data
                     else:
-                        json_dict['single'] = small_url + doc['data']
+                        if doc['contract'] == 'v2':
+                            json_dict['single'] = single_url + doc['data']
+                            json_dict['edition'] = doc['edition']
+                            json_dict['edition_count'] = doc['edition_count']
+                        else :
+                            json_dict['single'] = small_url + doc['data']
                 return_list.append(json_dict)
             except Exception as e:
-                server.logger.exception('token_id:{} {}'.format(doc['_id'], e))
+                server.logger.exception('token_id:{},contract:{} {}'.format(doc['token_id'],doc['contract'],e))
         index = index + 1
     return json.dumps(
         dict(count=data_count,
@@ -286,7 +320,8 @@ def add_works(token_id,
               width=0,
               height=0):
     works.insert_one({
-        '_id': token_id,
+        'contract': 'v1',
+        'token_id': token_id,
         'data': data,
         'is_movie': is_movie,
         'metadata_hash': metadata_hash,
@@ -315,14 +350,21 @@ def add_works(token_id,
 
 # 授权token_id
 def approve_token(user_address, main_token, second_num):
-    nonce = w3.eth.get_transaction_count(wallet_address, 'pending')
+    while 1:
+        try:
+            nonce = w3.eth.get_transaction_count(wallet_address, 'pending')
+            break
+        except Exception:
+            time.sleep(0.1)
+            pass
     transact = {'gas': 160000, 'nonce': nonce}
     transaction = contract.functions.whitelistTokenForCreator(
         user_address, main_token, second_num, 15, 5).buildTransaction(transact)
     tx = w3.eth.account.sign_transaction(transaction, private_key)
     tx_hash = w3.eth.send_raw_transaction(tx.rawTransaction)
     tx_hash = tx_hash.hex()
-    w3.eth.wait_for_transaction_receipt(tx_hash)
+    result = w3.eth.wait_for_transaction_receipt(tx_hash)
+    return result['status']
 
 
 # small_size
@@ -368,6 +410,12 @@ def compress(old_path, new_path):
             im.save(new_path, transparent=True)
 
 
+def stamp_to_str(time_stamp):
+    time_temp = float(time_stamp)/1000
+    time_str = datetime.utcfromtimestamp(time_temp).strftime('%Y-%m-%d %H:%M:%S.%f')
+    return time_str + ' UTC'
+
+
 # 获取token_id
 @server.route('/get_token', methods=['POST'])
 def get_token():
@@ -387,7 +435,10 @@ def get_token():
     doc = token_number.find_one({'_id': 1})
     token_num = doc['token_num']
     token_id = token_num
-    approve_token(user_address, token_id, len(layer))
+    status = approve_token(user_address, token_id, len(layer))
+    if status == 0:
+        lock.release()
+        return 'Authorization failed!'
     token_number.update_one(
         {'_id': 1}, {'$set': {
             'token_num': token_num + len(layer) + 1
@@ -421,22 +472,19 @@ def get_token():
                                                  new_name)
             os.rename(img_path, new_path)
             compress(new_path, small_path)
-            q.put(new_path)
+            file_queue.put(new_path)
             path_arr.append(new_path[6:])
             layer_arr.append(layer_hash)
         doc = layer[index]
         layer_json = make_json(doc['name'], 'layer', user_address, create_time,
                                doc['introduce'], layer_token_id, token_id,
                                layer_arr, [], 'png', width, height)
-        p.put(layer_json)
+        str_queue.put(layer_json)
         layer_metadata_hash = get_hash(layer_json, False)
-        # layer_num = works.count_documents({'_id': layer_token_id})
-        # if layer_num == 1:
-        #     works.delete_one({'_id': layer_token_id})
         try:
-            add_works(layer_token_id, path_arr, layer_metadata_hash,
+            add_works(layer_token_id, path_arr, pinata_url + layer_metadata_hash,
                       user_address, doc['introduce'], create_time, doc['name'],
-                      layer_json, 'layer', False, width, height)
+                      json.loads(layer_json), 'layer', False, width, height)
         except Exception as e:
             server.logger.exception(e)
         json_dict = {
@@ -445,17 +493,11 @@ def get_token():
             'layer_metadata_hash': pinata_url + layer_metadata_hash,
         }
         return_list.append(json_dict)
-        approve.insert_one({
-            '_id': layer_token_id,
-            'type': 'layer',
-            'user_address': user_address,
-            'hash': layer_metadata_hash,
-        })
         index = index + 1
     canvas_json = make_json(canvas['name'], 'canvas', user_address,
-                            create_time, canvas['introduce'], token_id,
+                            stamp_to_str(create_time), canvas['introduce'], token_id,
                             token_id, layer_token, [], '', width, height)
-    p.put(canvas_json)
+    str_queue.put(canvas_json)
     canvas_metadata_hash = get_hash(canvas_json, False)
     canvas_dict = {
         'type': 'canvas',
@@ -463,19 +505,10 @@ def get_token():
         'canvas_metadata_hash': pinata_url + canvas_metadata_hash,
     }
     return_list.append(canvas_dict)
-    approve.insert_one({
-        '_id': token_id,
-        'type': 'canvas',
-        'user_address': user_address,
-        'hash': pinata_url + canvas_metadata_hash,
-    })
-    # canvas_num = works.count_documents({'_id': token_id})
-    # if canvas_num == 1:
-    #     works.delete_one({'_id': token_id})
     try:
-        add_works(token_id, layer_token, canvas_metadata_hash, user_address,
-                  canvas['introduce'], create_time, canvas['name'],
-                  canvas_json, 'canvas', False, width, height)
+        add_works(token_id, layer_token, pinata_url + canvas_metadata_hash,
+                  user_address,canvas['introduce'], create_time, canvas['name'],
+                  json.loads(canvas_json), 'canvas', False, width, height)
     except Exception as e:
         server.logger.exception(e)
     return jsonify(return_list)
@@ -485,73 +518,39 @@ def get_token():
 @server.route('/single_token', methods=['POST'])
 def single_token():
     # 获取当前token_id
-    lock = request.environ['HTTP_FLASK_LOCK']
     user_address = request.form.get('user_address')
     user_address = Web3.toChecksumAddress(user_address)
-    # if not contract.functions.artistWhitelist(user_address).call(
-    #     {'gas': 50000}):
-    #     return {}
     name = request.form.get('name')
     introduce = request.form.get('introduce')
     create_time = request.form.get('create_time')
     create_time = int(create_time)
-    lock.acquire()
-    doc = token_number.find_one({'_id': 1})
-    token_num = doc['token_num']
-    token_id = token_num
-    approve_token(user_address, token_id, 0)
-    token_number.update_one({'_id': 1}, {'$set': {'token_num': token_num + 1}})
-    lock.release()
-    if not os.path.exists(folder + '/' + user_address):
-        os.mkdir(folder + '/' + user_address)
-    if not os.path.exists(folder + '/small/' + user_address):
-        os.mkdir(folder + '/small/' + user_address)
     single_file = request.files['str']
     file_name = secure_filename(single_file.filename)
     img = file_name.rsplit('.')[-1].lower()
-    if img in ['mp4', 'm4v', 'mov', 'gif']:
-        is_movie = True
+    now = int(time.time())
+    if not os.path.exists('{}/temp/{}'.format(folder, user_address)):
+        os.mkdir('{}/temp/{}'.format(folder, user_address))
+    temp_path = '{}/temp/{}/{}.{}'.format(folder, user_address, now, img)
+    single_file.save(temp_path)
+    single_hash = get_hash(temp_path, True)
+    if img in ['jpg', 'jpeg', 'gif', 'png']:
+        image = Image.open(temp_path)
+        width, height = image.size
     else:
-        is_movie = False
-    t = time.time()
-    img_path = '{}/{}/{}.{}'.format(folder, user_address, str(int(t)), img)
-    single_file.save(img_path)
-    single_hash = get_hash(img_path, True)
-    new_name = str(token_id) + '_' + single_hash + '.' + img
-    new_path = '{}/{}/{}'.format(folder, user_address, new_name)
-    small_path = '{}/small/{}/{}'.format(folder, user_address, new_name)
-    if is_movie:
-        small_path = small_path.rsplit('.')[0] + '.mp4'
-    os.rename(img_path, new_path)
-    compress(new_path, small_path)
-    q.put(new_path)
-    single_json = make_json(name, 'single', user_address, create_time,
-                            introduce, token_id, token_id, [single_hash], [],
-                            img)
-    p.put(single_json)
+        vcap = cv2.VideoCapture(temp_path)
+        if vcap.isOpened():
+            width = int(vcap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(vcap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if os.path.exists(temp_path):
+        os.remove(temp_path)
+    single_json = make_single_json(name, 'single', user_address, stamp_to_str(create_time),
+                            introduce,[single_hash], [], img, width, height)
+    str_queue.put(single_json)
     single_metadata_hash = get_hash(single_json, False)
-    user_number = user.count_documents({'_id': user_address})
-    if user_number == 0:
-        add_user(user_address)
-    # single_num = works.count_documents({'_id': token_id})
-    # if single_num == 1:
-    #     works.delete_one({'_id': token_id})
-    try:
-        add_works(token_id, new_path[6:], single_metadata_hash, user_address,
-                  introduce, create_time, name, single_json, 'single',
-                  is_movie)
-    except Exception as e:
-        server.logger.exception(e)
     json_dict = {
-        'token_id': token_id,
+        'token_id': '',
         'single_metadata_hash': pinata_url + single_metadata_hash,
     }
-    approve.insert_one({
-            '_id': token_id,
-            'user_address': user_address,
-            'type': 'single',
-            'hash': pinata_url + single_metadata_hash,
-        })
     return json_dict
 
 
@@ -592,66 +591,35 @@ def get_created():
     return result
 
 
-# 根据地址获取藏品
-@server.route('/get_collection', methods=['GET'])
-def get_collection():
-    user_address = request.args.get('user_address')
-    user_address = Web3.toChecksumAddress(user_address)
-    page = request.args.get('page')
-    state = request.args.get('state')
-    pic = request.args.get('pic')
-    result = get_works_from_user(2, user_address, 'collector', int(page), pic,
-                                 state)
-    return result
-
-
-# 用户收藏艺术家作品
-@server.route('/append_works', methods=['POST'])
-def append_works():
-    data = request.get_json()
-    token_id = int(data['token_id'])
-    user_address = Web3.toChecksumAddress(data['user_address'])
-    doc = works.find_one({'_id': token_id})
-    collector = doc['collector']
-    if user_address not in collector:
-        collector.append(user_address)
-    works.update_one({'_id': token_id}, {'$set': {'collector': collector}})
-    return ''
-
-
-# 用户取消收藏艺术家作品
-@server.route('/remove_works', methods=['POST'])
-def remove_works():
-    data = request.get_json()
-    token_id = int(data['token_id'])
-    user_address = Web3.toChecksumAddress(data['user_address'])
-    doc = works.find_one({'_id': token_id})
-    collector = doc['collector']
-    if user_address in collector:
-        collector.remove(user_address)
-    works.update_one({'_id': token_id}, {'$set': {'collector': collector}})
-    return ''
-
-
-# 根据tokenid获取画布信息
+# 根据tokenid获取画布信息 x
 @server.route('/get_canvas', methods=['GET'])
 def get_canvas():
     token = request.args.get('token_id')
     token = int(token)
+    single = request.args.get('single')
     return_list = []
-    num = works.count_documents({'_id': token})
+    cursor_dict = {'token_id': token}
+    if single == 'true':
+        cursor_dict['contract'] = 'b'
+    else:
+        cursor_dict['contract'] = 'a'
+    num = works.count_documents(cursor_dict)
     if num == 0:
         return 'The token_id does not exist'
-    cursor = works.find_one({'_id': token})
+    cursor = works.find_one(cursor_dict)
     if cursor['type'] == 'canvas':
         return_list.append({
             'type': 'address',
             'user_address': cursor['owner']
         })
-        return_list.append({'type': 'canvas', 'name': cursor['name']})
+        return_list.append({
+            'type': 'canvas',
+            'name': cursor['name'],
+            'contractVersion': cursor['contract']
+        })
         layer_arr = cursor['data']
         for i in layer_arr:
-            doc = works.find_one({'_id': i})
+            doc = works.find_one({'token_id': i,'contract':'v1'})
             data = doc['data']
             for j in range(len(data)):
                 data[j] = url + data[j]
@@ -670,6 +638,7 @@ def get_canvas():
             'name': cursor['name'],
             'str': url + cursor['data'],
             'introduce': cursor['introduce'],
+            'contractVersion': cursor['contract'],
         }
         return json_dict
     return {}
@@ -683,14 +652,17 @@ def save_info():
     count = user.count_documents({'_id': user_address})
     src = data['avatar']
     if src:
-        image_hash = get_hash(src, False)
-        new_src = src.split(',')[1]
-        image_type = src.split('/')[1].split(';')[0]
-        image_data = base64.b64decode(new_src)
-        image_file = '{}/avatar/{}.{}'.format(folder, image_hash, image_type)
-        with open(image_file, 'wb') as f:
-            f.write(image_data)
-        src = image_file[6:]
+        if src[:4] == 'data':
+            image_hash = get_hash(src, False)
+            new_src = src.split(',')[1]
+            image_type = src.split('/')[1].split(';')[0]
+            image_data = base64.b64decode(new_src)
+            image_file = '{}/avatar/{}.{}'.format(folder, image_hash, image_type)
+            with open(image_file, 'wb') as f:
+                f.write(image_data)
+            src = image_file[6:]
+        else:
+            src = src[32:]
     if count == 0:
         user.insert_one({
             '_id': user_address,
@@ -742,14 +714,16 @@ def get_info():
 @server.route('/get_works', methods=['GET'])
 def get_works():
     token = request.args.get('token_id')
+    contract_version = request.args.get('contractVersion')
     token = int(token)
-    num = works.count_documents({'_id': token})
+    cursor_dict = {'token_id': token, 'contract':contract_version}
+    num = works.count_documents(cursor_dict)
     if num == 0:
         return {}
-    cursor = works.find_one({'_id': token})
+    cursor = works.find_one(cursor_dict)
     try:
         json_dict = {
-            'token_id': cursor['_id'],
+            'token_id': cursor['token_id'],
             'name': cursor['name'],
             'type': cursor['type'],
             'introduce': cursor['introduce'],
@@ -762,6 +736,9 @@ def get_works():
             'owner_avatar': info(cursor['owner'], 'avatar'),
             'state1': cursor['state1'],
             'state2': cursor['state2'],
+            'contractVersion': cursor['contract'],
+            'metadata_url': cursor['metadata_hash'],
+            'image_url': cursor['json_data']['image']
         }
         if json_dict['state1'] == 1:
             json_dict['buy_price'] = int(cursor['buy_price'])
@@ -775,9 +752,12 @@ def get_works():
                 json_dict['end_price'] = int(cursor['end_price'])
         if cursor['type'] == 'layer':
             json_data = cursor['json_data']
-            data = json.loads(json_data)
+            try:
+                data = json.loads(json_data)
+            except Exception:
+                data = json_data
             json_dict['canvas_token_id'] = data['canvas_token_id']
-            doc = works.find_one({'_id': data['canvas_token_id']})
+            doc = works.find_one({'token_id': data['canvas_token_id'], 'contract':'v1'})
             canvas_name = doc['name']
             json_dict['canvas_name'] = canvas_name
             json_dict['width'] = cursor['width']
@@ -793,7 +773,7 @@ def get_works():
             layer_arr = cursor['data']
             arr = []
             for i in layer_arr:
-                doc = works.find_one({'_id': i})
+                doc = works.find_one({'token_id': i,'contract':'v1'})
                 data = doc['data']
                 for j in range(len(data)):
                     data[j] = url + data[j]
@@ -801,7 +781,12 @@ def get_works():
             json_dict['layers'] = arr
             return json_dict
         else:
-            json_dict['single'] = url + cursor['data']
+            if contract_version == 'v2':
+                json_dict['single'] = url + 'single/' + cursor['data']
+                json_dict['edition'] = cursor['edition']
+                json_dict['edition_count'] = cursor['edition_count']
+            else:
+                json_dict['single'] = url + cursor['data']
             return json_dict
     except Exception as e:
         server.logger.exception(e)
@@ -813,15 +798,16 @@ def get_works():
 def update_coll():
     data = request.get_json()
     token = data['token_id']
+    contract_version = data['contractVersion']
     address_from = Web3.toChecksumAddress(data['address_from'])
     address_to = Web3.toChecksumAddress(data['address_to'])
     number = user.count_documents({'_id': address_to})
     if number == 0:
         add_user(address_to)
     try:
-        doc = works.find_one({'_id': token})
+        doc = works.find_one({'token_id': token, 'contract':contract_version})
         if doc['owner'] == address_from:
-            works.update_one({'_id': token}, {'$set': {'owner': address_to}})
+            works.update_one({'token_id': token, 'contract': contract_version}, {'$set': {'owner': address_to}})
     except Exception as e:
         server.logger.exception(e)
     return ''
@@ -831,170 +817,34 @@ def update_coll():
 @server.route('/burn_nft', methods=['POST'])
 def burn_nft():
     data = request.get_json()
-    token_id = int(data['token_id'])
-    works.delete_one({'_id': token_id})
+    token_id = data['token_id']
+    contract_version = data['contractVersion']
+    works.delete_one({'token_id': token_id, 'contract':contract_version})
     return ''
 
 
-# 用户关注艺术家
-@server.route('/follow_user', methods=['POST'])
-def follow_user():
-    data = request.get_json()
-    follow_from = Web3.toChecksumAddress(data['from'])
-    follow_to = Web3.toChecksumAddress(data['to'])
-    if user.count_documents({'_id':follow_from}) == 0:
-        add_user(follow_from)
-    if user.count_documents({'_id':follow_to}) == 0:
-        add_user(follow_to)
-    follow_doc = user.find_one({'_id': follow_from})
-    follows = follow_doc['follows']
-    if follow_to not in follows:
-        follows.append(follow_to)
-    user.update_one({'_id': follow_from}, {'$set': {'follows': follows}})
-    fans_doc = user.find_one({'_id': follow_to})
-    fans = fans_doc['fans']
-    if follow_from not in fans:
-        fans.append(follow_from)
-    user.update_one({'_id': follow_to}, {'$set': {'fans': fans}})
-    return ''
-
-
-# 用户取消关注艺术家
-@server.route('/unfollow_user', methods=['POST'])
-def unfollow_user():
-    data = request.get_json()
-    unfollow_from = Web3.toChecksumAddress(data['from'])
-    unfollow_to = Web3.toChecksumAddress(data['to'])
-    unfollow_doc = user.find_one({'_id': unfollow_from})
-    follows = unfollow_doc['follows']
-    if unfollow_to in follows:
-        follows.remove(unfollow_to)
-    user.update_one({'_id': unfollow_from}, {'$set': {'follows': follows}})
-    fans_doc = user.find_one({'_id': unfollow_to})
-    fans = fans_doc['fans']
-    if unfollow_from in fans:
-        fans.remove(unfollow_from)
-    user.update_one({'_id': unfollow_to}, {'$set': {'fans': fans}})
-    return ''
-
-
-# 获取用户的关注列表
-@server.route('/get_follows', methods=['GET'])
-def get_follows():
-    user_address = Web3.toChecksumAddress(request.args.get('user_address'))
-    user_count = user.count_documents({'_id':user_address})
-    if user_count == 0:
-        add_user(user_address)
-    doc = user.find_one({'_id': user_address})
-    follows = doc['follows']
+@server.route('/get_latest', methods=['GET'])
+def get_latest():
+    cursor = works.find({'contract':'v2'}).sort([('token_id',-1)])
+    index = 1
     return_list = []
-    for follow in follows:
-        return_list.append({
-            'user_address': follow,
-            'avatar': info(follow, 'avatar'),
-            'name': info(follow, 'name')
-        })
-    return jsonify(return_list)
-
-
-# 获取用户粉丝列表
-@server.route('/get_fans', methods=['GET'])
-def get_fans():
-    user_address = Web3.toChecksumAddress(request.args.get('user_address'))
-    user_count = user.count_documents({'_id':user_address})
-    if user_count == 0:
-        add_user(user_address)
-    doc = user.find_one({'_id': user_address})
-    fans = doc['fans']
-    return_list = []
-    for fan in fans:
-        return_list.append({
-            'user_address': fan,
-            'avatar': info(fan, 'avatar'),
-            'name': info(fan, 'name')
-        })
-    return jsonify(return_list)
-
-
-# 获取交易记录
-@server.route('/get_record', methods=['GET'])
-def get_record():
-    token_id = request.args.get('token_id')
-    user_address = request.args.get('user_address')
-    return_list = []
-    if token_id:
-        token_id = int(token_id)
-        cursor = record.find({'token_id': token_id}).sort([('time', -1)])
-    else:
-        user_address = w3.toChecksumAddress(user_address)
-        cursor = record.find({
-            '$or': [{
-                'from': user_address
-            }, {
-                'to': user_address
-            }]
-        }).sort([('time', -1)])
     for doc in cursor:
-        return_list.append(doc)
+        if index > 3:
+            break
+        else:
+            token_id = doc['token_id']
+            params = {
+                'token_id': token_id,
+                'contractVersion': 'v2'
+            }
+            data = requests.get(host + 'get_works', params = params).text
+            data = json.loads(data)
+            return_list.append(data)
+            index = index + 1
     return jsonify(return_list)
-
-
-# 获取用户未铸币的token
-@server.route('/get_approved', methods=['GET'])
-def get_approved():
-    user_address = request.args.get('user_address')
-    user_address = Web3.toChecksumAddress(user_address)
-    return_list = []
-    cursor = approve.find({'user_address': user_address}).sort([('_id', 1)])
-    for doc in cursor:
-        return_list.append(doc)
-    return jsonify(return_list)
-
-
-# 获取用户收益
-@server.route('/get_income', methods=['GET'])
-def get_income():
-    user_address = request.args.get('user_address')
-    user_address = w3.toChecksumAddress(user_address)
-    cursor1 = sell.find({'user_address':user_address})
-    cursor2 = profit.find({'user_address':user_address})
-    sell_list = []
-    profit_list = []
-    total_sell = 0
-    total_profit = 0
-    for doc in cursor1:
-        doc['price'] = int(doc['price'])
-        sell_list.append(doc)
-        total_sell = total_sell + int(doc['price'])
-    for doc in cursor2:
-        doc['price'] = int(doc['price'])
-        profit_list.append(doc)
-        total_profit = total_profit + int(doc['price'])
-    return dict({
-        'sell': sell_list,
-        'total_sell': total_sell,
-        'profit': profit_list,
-        'total_profit': total_profit,
-        'total': total_sell + total_profit
-    })
-
-
-# 搜索匹配内容
-@server.route('/search_content', methods=['GET'])
-def search_content():
-    query = request.args.get('query')
-    work_list = []
-    user_list = []
-    work_cursor = works.find({'name':{'$regex':query,'$options':'$i'}})
-    for doc in work_cursor:
-        work_list.append(dict(name=doc['name'],token_id=doc['_id']))
-    user_cursor = user.find({'name':{'$regex':query,'$options':'$i'}})
-    for doc in user_cursor:
-        user_list.append(dict(name=doc['name'],address=doc['_id']))
-    return dict(works=work_list,work_count=len(work_list),user=user_list,user_count=len(user_list))
 
 
 t1 = Thread(target=pin_str_to_ipfs)
-t2 = Thread(target=pin_file_to_ipfs)
 t1.start()
+t2 = Thread(target=pin_file_to_ipfs)
 t2.start()
